@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 環境變數檔案
+.env
+.env_*
+.env_production
+.env_development
+.env_test
+
+# 證書和密碼
+*.pfx
+*.cer
+*.p12
+*.pem
+*.key
+cert/
+certs/
+certificates/
+*.certificate
+
+# 日誌文件
+*.log
+logs/
+log/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# 本地設定檔案
+*.local
+
+# 測試文件
+coverage.xml
+.coverage
+
+# AWS
+.aws/
