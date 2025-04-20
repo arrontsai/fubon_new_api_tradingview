@@ -60,3 +60,6 @@ coverage.xml
 .venv/
 node_modules/
 webhook_lambda.zip
+
+#serverless
+.serverless/
