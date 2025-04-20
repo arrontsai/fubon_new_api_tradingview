@@ -1,0 +1,89 @@
+# 富邦交易API與TradingView Webhook整合系統 - 最簡配置
+service: fubon-webhook
+
+provider:
+  name: aws
+  profile: default
+  stage: dev
+  runtime: python3.9
+  region: ap-northeast-1
+  memorySize: 256
+  timeout: 30
+  deploymentBucket:
+    name: fubon-webhook-deployments
+  environment:
+    APP_ENV: production
+    ENABLE_MOCK: false
+    LOG_LEVEL: INFO
+    SECRETS_NAME: 'fubon/cert'
+
+# 使用zip直接打包需要的文件
+package:
+  individually: false
+  patterns:
+    # 包含需要的文件
+    - '*.py'
+    - 'fubon_api/**'
+    - 'webhook/**'
+    # 排除不需要的文件
+    - '!node_modules/**'
+    - '!.env*'
+    - '!deploy_aws.py'
+    - '!*.zip'
+    - '!*.md'
+    - '!tests/**'
+    - '!.git/**'
+    - '!.serverless/**'
+    - '!__pycache__/**'
+    - '!*.pyc'
+
+functions:
+  webhook:
+    handler: simple_webhook_handler.handler
+    description: '富邦期貨交易API TradingView Webhook處理程序'
+    memorySize: 256
+    timeout: 30
+    layers:
+      - { Ref: FubonSdkLayerLambdaLayer }
+    events:
+      - httpApi:
+          path: /webhook/tradingview
+          method: post
+      - httpApi:
+          path: /health
+          method: get
+    environment:
+      DEBUG_MODE: false
+
+# Lambda Layer 設定
+layers:
+  FubonSdkLayer:
+    path: layer
+    compatibleRuntimes:
+      - python3.9
+    description: Fubon SDK for Lambda
+
+# 使用外部插件
+plugins:
+  - serverless-python-requirements
+  - serverless-dotenv-plugin
+  - serverless-offline
+
+# 自定義設定
+custom:
+  pythonRequirements:
+    dockerizePip: true
+    noDeploy:
+      - boto3
+      - botocore
+    # Python包安裝路徑
+    pythonBin: python
+    # 使用pip快取以加速部署    useDownloadCache: true
+    useStaticCache: true
+
+  isOffline: ${env:IS_OFFLINE, 'false'}
+  serverless-offline:
+    httpPort: 3000
+    noPrependStageInUrl: true
+    useChildProcesses: true
+    printOutput: true

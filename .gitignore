@@ -55,3 +55,8 @@ coverage.xml
 
 # AWS
 .aws/
+
+#環境相關
+.venv/
+node_modules/
+webhook_lambda.zip

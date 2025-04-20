@@ -1,0 +1,355 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "The AWS CloudFormation template for this Serverless application",
+  "Resources": {
+    "WebhookLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": "/aws/lambda/fubon-webhook-dev-webhook"
+      }
+    },
+    "IamRoleLambdaExecution": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "lambda.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": {
+              "Fn::Join": [
+                "-",
+                [
+                  "fubon-webhook",
+                  "dev",
+                  "lambda"
+                ]
+              ]
+            },
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:CreateLogGroup",
+                    "logs:TagResource"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/fubon-webhook-dev*:*"
+                    }
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/fubon-webhook-dev*:*:*"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "Path": "/",
+        "RoleName": {
+          "Fn::Join": [
+            "-",
+            [
+              "fubon-webhook",
+              "dev",
+              {
+                "Ref": "AWS::Region"
+              },
+              "lambdaRole"
+            ]
+          ]
+        }
+      }
+    },
+    "FubonSdkLayerLambdaLayer": {
+      "Type": "AWS::Lambda::LayerVersion",
+      "Properties": {
+        "Content": {
+          "S3Bucket": "fubon-webhook-deployments",
+          "S3Key": "serverless/fubon-webhook/dev/1744984679821-2025-04-18T13:57:59.821Z/FubonSdkLayer.zip"
+        },
+        "LayerName": "FubonSdkLayer",
+        "Description": "Fubon SDK for Lambda",
+        "CompatibleRuntimes": [
+          "python3.9"
+        ]
+      }
+    },
+    "WebhookLambdaFunction": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Code": {
+          "S3Bucket": "fubon-webhook-deployments",
+          "S3Key": "serverless/fubon-webhook/dev/1744992307752-2025-04-18T16:05:07.752Z/fubon-webhook.zip"
+        },
+        "Handler": "simple_webhook_handler.handler",
+        "Runtime": "python3.9",
+        "FunctionName": "fubon-webhook-dev-webhook",
+        "MemorySize": 256,
+        "Timeout": 30,
+        "Description": "富邦期貨交易API TradingView Webhook處理程序",
+        "Environment": {
+          "Variables": {
+            "APP_ENV": "production",
+            "ENABLE_MOCK": "False  # 啟用模擬模式",
+            "LOG_LEVEL": "INFO",
+            "SECRETS_NAME": "fubon/cert",
+            "FUBON_CERT_PATH": "reference/S124709364.pfx",
+            "FUBON_CERT_PASSWORD": "test123",
+            "FUBON_PERSONAL_ID": "TEST_ID",
+            "FUBON_PASSWORD": "test_password",
+            "WEBHOOK_SECRET": "test_secret",
+            "RELOAD_ON_CHANGE": "True  # 自動重新載入",
+            "SHOW_DETAILS_ERRORS": "True  # 顯示詳細錯誤信息",
+            "HOST": "0.0.0.0",
+            "PORT": "8000",
+            "USE_HTTPS": "False  # 開發環境通常不需要HTTPS",
+            "SSL_CERT_PATH": "certs/dev_cert.pem",
+            "SSL_KEY_PATH": "certs/dev_key.pem",
+            "DEBUG_MODE": "false"
+          }
+        },
+        "Role": {
+          "Fn::GetAtt": [
+            "IamRoleLambdaExecution",
+            "Arn"
+          ]
+        },
+        "Layers": [
+          {
+            "Ref": "FubonSdkLayerLambdaLayer"
+          }
+        ]
+      },
+      "DependsOn": [
+        "WebhookLogGroup"
+      ]
+    },
+    "WebhookLambdaVersionLXnxBZU4BRxuP5aYOZ9Ot8fL5rIyDsNddtHxnsIio0": {
+      "Type": "AWS::Lambda::Version",
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "FunctionName": {
+          "Ref": "WebhookLambdaFunction"
+        },
+        "CodeSha256": "kNcTAmZSyeK6MgGMHXQ9AFgyCA+uxhkDo3GSisZyAXE=",
+        "Description": "富邦期貨交易API TradingView Webhook處理程序"
+      }
+    },
+    "HttpApi": {
+      "Type": "AWS::ApiGatewayV2::Api",
+      "Properties": {
+        "Name": "dev-fubon-webhook",
+        "ProtocolType": "HTTP"
+      }
+    },
+    "HttpApiStage": {
+      "Type": "AWS::ApiGatewayV2::Stage",
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi"
+        },
+        "StageName": "$default",
+        "AutoDeploy": true,
+        "DefaultRouteSettings": {
+          "DetailedMetricsEnabled": false
+        }
+      }
+    },
+    "WebhookLambdaPermissionHttpApi": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "FunctionName": {
+          "Fn::GetAtt": [
+            "WebhookLambdaFunction",
+            "Arn"
+          ]
+        },
+        "Action": "lambda:InvokeFunction",
+        "Principal": "apigateway.amazonaws.com",
+        "SourceArn": {
+          "Fn::Join": [
+            "",
+            [
+              "arn:",
+              {
+                "Ref": "AWS::Partition"
+              },
+              ":execute-api:",
+              {
+                "Ref": "AWS::Region"
+              },
+              ":",
+              {
+                "Ref": "AWS::AccountId"
+              },
+              ":",
+              {
+                "Ref": "HttpApi"
+              },
+              "/*"
+            ]
+          ]
+        }
+      }
+    },
+    "HttpApiIntegrationWebhook": {
+      "Type": "AWS::ApiGatewayV2::Integration",
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi"
+        },
+        "IntegrationType": "AWS_PROXY",
+        "IntegrationUri": {
+          "Fn::GetAtt": [
+            "WebhookLambdaFunction",
+            "Arn"
+          ]
+        },
+        "PayloadFormatVersion": "2.0",
+        "TimeoutInMillis": 30000
+      }
+    },
+    "HttpApiRoutePostWebhookTradingview": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi"
+        },
+        "RouteKey": "POST /webhook/tradingview",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "HttpApiIntegrationWebhook"
+              }
+            ]
+          ]
+        }
+      },
+      "DependsOn": "HttpApiIntegrationWebhook"
+    },
+    "HttpApiRouteGetHealth": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi"
+        },
+        "RouteKey": "GET /health",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "HttpApiIntegrationWebhook"
+              }
+            ]
+          ]
+        }
+      },
+      "DependsOn": "HttpApiIntegrationWebhook"
+    }
+  },
+  "Outputs": {
+    "ServerlessDeploymentBucketName": {
+      "Value": "fubon-webhook-deployments",
+      "Export": {
+        "Name": "sls-fubon-webhook-dev-ServerlessDeploymentBucketName"
+      }
+    },
+    "FubonSdkLayerLambdaLayerQualifiedArn": {
+      "Description": "Current Lambda layer version",
+      "Value": {
+        "Ref": "FubonSdkLayerLambdaLayer"
+      },
+      "Export": {
+        "Name": "sls-fubon-webhook-dev-FubonSdkLayerLambdaLayerQualifiedArn"
+      }
+    },
+    "FubonSdkLayerLambdaLayerHash": {
+      "Description": "Current Lambda layer hash",
+      "Value": "2b9615c58668a9f07361ffe34fb1105f0df3c747",
+      "Export": {
+        "Name": "sls-fubon-webhook-dev-FubonSdkLayerLambdaLayerHash"
+      }
+    },
+    "FubonSdkLayerLambdaLayerS3Key": {
+      "Description": "Current Lambda layer S3Key",
+      "Value": "serverless/fubon-webhook/dev/1744984679821-2025-04-18T13:57:59.821Z/FubonSdkLayer.zip",
+      "Export": {
+        "Name": "sls-fubon-webhook-dev-FubonSdkLayerLambdaLayerS3Key"
+      }
+    },
+    "WebhookLambdaFunctionQualifiedArn": {
+      "Description": "Current Lambda function version",
+      "Value": {
+        "Ref": "WebhookLambdaVersionLXnxBZU4BRxuP5aYOZ9Ot8fL5rIyDsNddtHxnsIio0"
+      },
+      "Export": {
+        "Name": "sls-fubon-webhook-dev-WebhookLambdaFunctionQualifiedArn"
+      }
+    },
+    "HttpApiId": {
+      "Description": "Id of the HTTP API",
+      "Value": {
+        "Ref": "HttpApi"
+      },
+      "Export": {
+        "Name": "sls-fubon-webhook-dev-HttpApiId"
+      }
+    },
+    "HttpApiUrl": {
+      "Description": "URL of the HTTP API",
+      "Value": {
+        "Fn::Join": [
+          "",
+          [
+            "https://",
+            {
+              "Ref": "HttpApi"
+            },
+            ".execute-api.",
+            {
+              "Ref": "AWS::Region"
+            },
+            ".",
+            {
+              "Ref": "AWS::URLSuffix"
+            }
+          ]
+        ]
+      },
+      "Export": {
+        "Name": "sls-fubon-webhook-dev-HttpApiUrl"
+      }
+    }
+  }
+}

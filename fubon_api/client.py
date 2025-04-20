@@ -8,47 +8,81 @@ import time
 import json
 import logging
 import datetime
-from datetime import date
+import base64
+import tempfile
+from datetime import date, timedelta
 from typing import Dict, List, Any, Union, Optional
 
+import boto3
 from config import settings
 
 # 導入富邦SDK
 try:
+    # 首先嘗試直接導入SDK（由Layer提供）
     from fubon_neo import _fubon_neo
-    # 確認SDK版本
-    if hasattr(_fubon_neo, 'version'):
-        logging.info(f"富邦SDK版本: {_fubon_neo.version}")
-    
-    # 嘗試導入SDK
-    FUBON_SDK_AVAILABLE = True
-    logging.info("富邦SDK已成功導入")
-    
-except ImportError as e:
-    FUBON_SDK_AVAILABLE = False
-    logging.warning(f"無法導入富邦SDK: {e}，使用模擬模式")
+    logging.getLogger(__name__).info("成功直接導入富邦SDK")
+except ImportError:
+    # 嘗試使用層中的安裝腳本
+    try:
+        # 檢查是否在Lambda環境中運行
+        if os.environ.get('AWS_LAMBDA_FUNCTION_NAME'):
+            # 嘗試從site-packages導入安裝腳本
+            logging.getLogger(__name__).info("嘗試從Lambda Layer導入SDK安裝腳本")
+            try:
+                import fubon_sdk_setup
+                logging.getLogger(__name__).info("成功導入SDK安裝腳本")
+                
+                # 再次嘗試導入
+                try:
+                    from fubon_neo import _fubon_neo
+                    logging.getLogger(__name__).info("通過安裝腳本成功導入富邦SDK")
+                except ImportError:
+                    logging.getLogger(__name__).error("安裝後仍無法導入富邦SDK，切換到模擬模式")
+                    _fubon_neo = None
+            except ImportError:
+                logging.getLogger(__name__).error("未找到SDK安裝腳本，切換到模擬模式")
+                _fubon_neo = None
+        else:
+            # 非Lambda環境
+            logging.getLogger(__name__).warning("無法導入富邦SDK: ImportError，切換到模擬模式")
+            _fubon_neo = None
+    except Exception as e:
+        logging.getLogger(__name__).error(f"導入SDK時發生未知錯誤: {str(e)}，切換到模擬模式")
+        _fubon_neo = None
+
+# 確認SDK版本
+if hasattr(_fubon_neo, 'version'):
+    logging.info(f"富邦SDK版本: {_fubon_neo.version}")
+
+# 嘗試導入SDK
+FUBON_SDK_AVAILABLE = _fubon_neo is not None
+logging.info("富邦SDK已成功導入" if FUBON_SDK_AVAILABLE else "無法導入富邦SDK，使用模擬模式")
 
 class FubonClient:
     """富邦期貨交易API客戶端"""
     
-    def __init__(self, cert_path: str, cert_password: str, personal_id: str = "", password: str = ""):
+    def __init__(self, cert_path: str = None, cert_password: str = None, personal_id: str = "", password: str = ""):
         """
         初始化富邦API客戶端
         
         參數:
-            cert_path: 憑證路徑
+            cert_path: 憑證路徑、Secrets Manager密鑰路徑（使用 secrets: 前綴）或Parameter Store參數名稱
             cert_password: 憑證密碼
             personal_id: 個人ID（登入用）
             password: 登入密碼
         """
-        self.cert_path = cert_path
-        self.cert_password = cert_password
-        self.personal_id = personal_id or settings.PERSONAL_ID
-        self.password = password or settings.PASSWORD
+        # 只從 settings 取得，確保所有敏感資訊皆由 config.py 控制
+        self.cert_path = settings.CERT_PATH
+        self.cert_password = settings.CERT_PASSWORD
+        self.personal_id = settings.PERSONAL_ID
+        self.password = settings.PASSWORD
         self.logger = logging.getLogger(__name__)
         
         # 檢查是否強制使用模擬模式
-        self.use_mock = settings.ENABLE_MOCK
+        self.use_mock = os.environ.get("ENABLE_MOCK", "false").lower() in ['true', '1', 'yes', 'y']
+        
+        # AWS區域
+        self.aws_region = os.environ.get("AWS_REGION", "ap-northeast-1")
         
         # 連線狀態
         self.connected = False
@@ -56,56 +90,167 @@ class FubonClient:
         # 富邦API實例 (根據文檔中的示例和實際模組結構初始化)
         self.sdk = None
         
+        # 臨時憑證檔案路徑（從Parameter Store加載時使用）
+        self.temp_cert_path = None
+        
         # 初始化API連線
         self._initialize_connection()
+    
+    def _get_cert_from_secrets_manager(self, secret_name):
+        """從AWS Secrets Manager獲取憑證並保存為臨時文件"""
+        try:
+            # 移除前綴標記符
+            if isinstance(secret_name, str) and secret_name.startswith('secrets:'):
+                secret_name = secret_name[8:]
+                
+            self.logger.info(f"從Secrets Manager獲取憑證: {secret_name}")
+            
+            # 創建Secrets Manager客戶端
+            secrets_client = boto3.client('secretsmanager', region_name=self.aws_region)
+            
+            # 獲取密鑰
+            response = secrets_client.get_secret_value(
+                SecretId=secret_name
+            )
+            
+            # 獲取密鑰內容
+            if 'SecretString' in response:
+                # 如果是JSON字符串
+                try:
+                    secret_data = json.loads(response['SecretString'])
+                    cert_base64 = secret_data.get('pfx')
+                except json.JSONDecodeError:
+                    # 如果不是JSON格式，直接使用字符串
+                    cert_base64 = response['SecretString']
+            elif 'SecretBinary' in response:
+                # 如果是二進制數據
+                cert_base64 = base64.b64encode(response['SecretBinary']).decode('utf-8')
+            else:
+                raise Exception("密鑰格式不正確")
+            
+            # 解碼Base64
+            cert_bytes = base64.b64decode(cert_base64)
+            
+            # 創建臨時文件
+            fd, temp_path = tempfile.mkstemp(suffix='.pfx')
+            with os.fdopen(fd, 'wb') as temp_file:
+                temp_file.write(cert_bytes)
+            
+            self.logger.info(f"憑證已保存到臨時文件: {temp_path}")
+            self.temp_cert_path = temp_path
+            return temp_path
+            
+        except Exception as e:
+            self.logger.error(f"從Secrets Manager獲取憑證時發生錯誤: {e}")
+            return None
+    
+    def _get_cert_from_parameter_store(self, param_name):
+        """從AWS Parameter Store獲取憑證並保存為臨時文件"""
+        try:
+            # 檢查是否是Parameter Store參數路徑格式
+            if not (isinstance(param_name, str) and param_name.startswith('/')):
+                return None
+                
+            self.logger.info(f"從Parameter Store獲取憑證: {param_name}")
+            
+            # 創建SSM客戶端
+            ssm = boto3.client('ssm', region_name=self.aws_region)
+            
+            # 獲取參數
+            response = ssm.get_parameter(
+                Name=param_name,
+                WithDecryption=True  # 自動解密SecureString類型的參數
+            )
+            
+            # 獲取Base64編碼的憑證內容
+            cert_base64 = response['Parameter']['Value']
+            
+            # 解碼Base64
+            cert_bytes = base64.b64decode(cert_base64)
+            
+            # 創建臨時文件
+            fd, temp_path = tempfile.mkstemp(suffix='.pfx')
+            with os.fdopen(fd, 'wb') as temp_file:
+                temp_file.write(cert_bytes)
+            
+            self.logger.info(f"憑證已保存到臨時文件: {temp_path}")
+            self.temp_cert_path = temp_path
+            return temp_path
+            
+        except Exception as e:
+            self.logger.error(f"從Parameter Store獲取憑證時發生錯誤: {e}")
+            return None
     
     def _initialize_connection(self):
         """初始化與富邦API的連線"""
         try:
-            if FUBON_SDK_AVAILABLE and not self.use_mock:
-                # 實際連線富邦API
-                self.logger.info("正在連線富邦API...")
+            # 檢查是否強制使用模擬模式
+            self.use_mock = os.environ.get("ENABLE_MOCK", "false").lower() in ['true', '1', 'yes', 'y']
+            
+            # 如果在生產環境，禁止使用模擬模式
+            if os.environ.get("APP_ENV", "").lower() == "production":
+                self.use_mock = False
+                self.logger.info("在生產環境中，強制停用模擬模式")
                 
+            # 記錄模擬狀態
+            if self.use_mock:
+                self.logger.warning("⚠️ 當前使用模擬模式，不會執行實際交易")
+            else:
+                self.logger.info("使用真實交易模式")
+                
+            # 如果不使用模擬模式，嘗試初始化SDK
+            if not self.use_mock and _fubon_neo is not None:
                 try:
-                    # 初始化富邦SDK (使用CoreSDK)
-                    self.sdk = _fubon_neo.CoreSDK()
+                    # 初始化SDK並連接
+                    self.sdk = _fubon_neo
+                    self.logger.info("成功初始化富邦SDK")
                     
-                    # 使用登入功能 (根據API文檔進行調整)
-                    login_result = self.sdk.login(
-                        self.personal_id, 
-                        self.password,
-                        self.cert_path,
-                        self.cert_password)
+                    # 實際連線富邦API
+                    self.logger.info("正在連線富邦API...")
                     
-                    if login_result.is_success:
-                        self.connected = True
-                        # 取得帳戶資訊
-                        account_data = login_result.data
-                        # 帳戶資訊可能是列表，處理這種情況
-                        if isinstance(account_data, list) and account_data:
-                            # 使用第二個帳戶
-                            self.account_list = account_data
-                            account = account_data[1]
-                            self.account_id = account.account if hasattr(account, 'account') else ""
-                            self.logger.info(f"富邦API登入成功，找到 {len(account_data)} 個帳戶")
-                            self.logger.info(f"使用第二個帳戶: {account.account if hasattr(account, 'account') else 'N/A'}")
-                            self.logger.info(f"  客戶名稱: {account.name if hasattr(account, 'name') else 'N/A'}")
-                            self.logger.info(f"  分公司代號: {account.branch_no if hasattr(account, 'branch_no') else 'N/A'}")
-                            self.logger.info(f"  帳號類型: {account.account_type if hasattr(account, 'account_type') else 'N/A'}")
+                    try:
+                        # 憑證路徑已由 config.py 處理，直接使用
+                        cert_path = self.cert_path
+                        self.sdk = _fubon_neo.CoreSDK()
+                        login_result = self.sdk.login(
+                            self.personal_id, 
+                            self.password,
+                            cert_path,
+                            self.cert_password)
+                        
+                        if login_result.is_success:
+                            self.connected = True
+                            # 取得帳戶資訊
+                            account_data = login_result.data
+                            # 帳戶資訊可能是列表，處理這種情況
+                            if isinstance(account_data, list) and account_data:
+                                # 使用第二個帳戶
+                                self.account_list = account_data
+                                account = account_data[1]
+                                self.account_id = account.account if hasattr(account, 'account') else ""
+                                self.logger.info(f"富邦API登入成功，找到 {len(account_data)} 個帳戶")
+                                self.logger.info(f"使用第二個帳戶: {account.account if hasattr(account, 'account') else 'N/A'}")
+                                self.logger.info(f"  客戶名稱: {account.name if hasattr(account, 'name') else 'N/A'}")
+                                self.logger.info(f"  分公司代號: {account.branch_no if hasattr(account, 'branch_no') else 'N/A'}")
+                                self.logger.info(f"  帳號類型: {account.account_type if hasattr(account, 'account_type') else 'N/A'}")
+                            else:
+                                # 單一帳戶
+                                self.account_list = [account_data] if account_data else []
+                                self.account_id = account_data.account if hasattr(account_data, 'account') else ""
+                                self.logger.info(f"富邦API登入成功，帳戶: {account_data.account if hasattr(account_data, 'account') else 'N/A'}")
                         else:
-                            # 單一帳戶
-                            self.account_list = [account_data] if account_data else []
-                            self.account_id = account_data.account if hasattr(account_data, 'account') else ""
-                            self.logger.info(f"富邦API登入成功，帳戶: {account_data.account if hasattr(account_data, 'account') else 'N/A'}")
-                    else:
-                        self.logger.error(f"富邦API登入失敗: {login_result.message}")
+                            self.logger.error(f"富邦API登入失敗: {login_result.message}")
+                            self.connected = False
+                            
+                    except Exception as e:
+                        self.logger.error(f"SDK初始化失敗: {e}")
                         self.connected = False
+                        raise
                         
                 except Exception as e:
-                    self.logger.error(f"SDK初始化失敗: {e}")
+                    self.logger.error(f"初始化連線時發生錯誤: {e}", exc_info=True)
                     self.connected = False
                     raise
-                
             else:
                 # 在開發環境或強制模擬模式下使用模擬模式
                 self.logger.warning("使用模擬模式連線")
@@ -114,6 +259,15 @@ class FubonClient:
             self.logger.error(f"連線富邦API時發生錯誤: {e}", exc_info=True)
             self.connected = False
             raise
+        finally:
+            # 如果使用了臨時文件，在連接建立後可以刪除
+            if self.temp_cert_path and os.path.exists(self.temp_cert_path):
+                try:
+                    os.unlink(self.temp_cert_path)
+                    self.logger.info(f"已刪除臨時憑證文件: {self.temp_cert_path}")
+                    self.temp_cert_path = None
+                except Exception as e:
+                    self.logger.warning(f"無法刪除臨時憑證文件: {e}")
     
     def login(self) -> object:
         """
@@ -317,6 +471,127 @@ class FubonClient:
     
     def _get_front_month_code(self, symbol_base: str) -> str:
         """
+        取得期貨近月合約代碼（如 TXF2405, MXF2405），優先使用 SDK 轉換
+        """
+        try:
+            today = date.today()
+            current_year = today.year
+            current_month = today.month
+            # 計算第三個週三（到期日）
+            first_day = date(current_year, current_month, 1)
+            weekday = first_day.weekday()
+            days_until_first_wednesday = (2 - weekday) % 7
+            first_wednesday = first_day.replace(day=1 + days_until_first_wednesday)
+            third_wednesday = first_wednesday.replace(day=first_wednesday.day + 14)
+            # 若今天超過到期日，則進入次月
+            if today > third_wednesday:
+                if current_month == 12:
+                    target_year = current_year + 1
+                    target_month = 1
+                else:
+                    target_year = current_year
+                    target_month = current_month + 1
+            else:
+                target_year = current_year
+                target_month = current_month
+
+            # 優先嘗試 SDK 轉換
+            if FUBON_SDK_AVAILABLE and hasattr(self.sdk, "futopt") and hasattr(self.sdk.futopt, "convert_symbol"):
+                exchange_symbol = None
+                if symbol_base.upper() == "TXF":
+                    exchange_symbol = "FITX"
+                elif symbol_base.upper() == "MXF":
+                    exchange_symbol = "FIMTX"
+                if exchange_symbol:
+                    date_string = f"{target_year}{target_month:02d}"
+                    complete_symbol = self.sdk.futopt.convert_symbol(exchange_symbol, date_string)
+                    self.logger.info(f"近月合約代碼: {complete_symbol} (對應 {date_string})")
+                    return complete_symbol
+            # fallback: 組合合約代碼（取年份後兩碼）
+            return f"{symbol_base}{str(target_year)[2:]}{target_month:02d}"
+        except Exception as e:
+            self.logger.error(f"近月合約代碼轉換失敗: {e}", exc_info=True)
+            return ""
+
+
+    def _get_next_month_code(self, symbol_base: str) -> str:
+        """
+        取得期貨次月合約代碼
+        """
+        today = date.today()
+        current_year = today.year
+        current_month = today.month
+        # 計算第三個週三
+        first_day = date(current_year, current_month, 1)
+        weekday = first_day.weekday()
+        days_until_first_wednesday = (2 - weekday) % 7
+        first_wednesday = first_day.replace(day=1 + days_until_first_wednesday)
+        third_wednesday = first_wednesday.replace(day=first_wednesday.day + 14)
+        # 決定次月
+        if current_month == 12:
+            next_month = 1
+            next_year = current_year + 1
+        else:
+            next_month = current_month + 1
+            next_year = current_year
+        # 產生合約代碼格式（如 MXF505）
+        date_string = f"{next_year}{next_month:02d}"
+        try:
+            if hasattr(self.sdk, 'futopt') and hasattr(self.sdk.futopt, 'convert_symbol'):
+                exchange_symbol = symbol_base
+                if symbol_base.upper() == "TXF":
+                    exchange_symbol = "FITX"
+                elif symbol_base.upper() == "MXF":
+                    exchange_symbol = "FIMTX"
+                complete_symbol = self.sdk.futopt.convert_symbol(exchange_symbol, date_string)
+                self.logger.info(f"次月合約代碼: {complete_symbol} (對應 {date_string})")
+                return complete_symbol
+            else:
+                self.logger.warning("SDK不支持convert_symbol方法，使用通用格式")
+                return f"{symbol_base}{str(next_year)[2:]}{next_month:02d}"
+        except Exception as e:
+            self.logger.error(f"合約代碼轉換失敗: {e}", exc_info=True)
+            return f"{symbol_base}{str(next_year)[2:]}{next_month:02d}"
+
+    def is_rollover_period(self, days_before_expiry: int = 1) -> bool:
+        """
+        判斷是否進入轉倉區間（預設到期日前1天）
+        """
+        today = date.today()
+        current_year = today.year
+        current_month = today.month
+        first_day = date(current_year, current_month, 1)
+        weekday = first_day.weekday()
+        days_until_first_wednesday = (2 - weekday) % 7
+        first_wednesday = first_day.replace(day=1 + days_until_first_wednesday)
+        third_wednesday = first_wednesday.replace(day=first_wednesday.day + 14)
+        rollover_start = third_wednesday - timedelta(days=days_before_expiry)
+        return today >= rollover_start and today <= third_wednesday
+
+    def get_target_symbol(self, symbol_base: str, rollover_days: int = 1) -> str:
+        """
+        根據是否進入轉倉區間，自動決定下單合約（近月或次月）
+        支援 symbol_base 為 MXF、MXF1、MXF01、MXF1! 等格式
+        """
+        import re
+        # 先判斷 symbol_base 是否已經帶有數字（如 MXF1、MXF01、MXF1!）
+        match = re.match(r"^([A-Z]+)(1|01)(!?)$", symbol_base)
+        if match:
+            # 只取商品代碼，不帶月份
+            symbol_base = match.group(1)
+        # 進入自動轉倉判斷
+        if self.is_rollover_period(days_before_expiry=rollover_days):
+            self.logger.info(f"進入轉倉區間，下次月合約")
+            symbol = self._get_next_month_code(symbol_base)
+        else:
+            symbol = self._get_front_month_code(symbol_base)
+        # 若 symbol 為 None 或空值，回傳空字串
+        if not symbol or not isinstance(symbol, str) or not symbol.strip():
+            self.logger.error(f"[get_target_symbol] symbol_base: {symbol_base} 轉換後為 None 或空字串")
+            return ""
+        return symbol
+
+        """
         取得期貨近月合約代碼
         
         臺灣期貨交易所的合約月份規則:
@@ -395,108 +670,57 @@ class FubonClient:
             Dict: 訂單結果
         """
         try:
-            if not self.connected:
-                self._initialize_connection()
-                
-            self.logger.info(f"下單 - 商品: {symbol}, 動作: {action}, 數量: {quantity}")
-            
-            # 處理商品代碼，轉換為近月合約
-            # 如果symbol已經包含了到期月份 (如MXF04)，則保持不變
+            # --- symbol 檢查與轉換 ---
+            if not symbol or not isinstance(symbol, str) or not symbol.strip():
+                self.logger.error(f"[下單失敗] symbol 參數異常，收到: {symbol!r}")
+                raise ValueError("symbol 參數不能為空或非字串，請檢查呼叫端傳入值")
+            symbol = symbol.strip().upper()
+            self.logger.info(f"[下單請求] 原始商品代碼: {symbol}, 動作: {action}, 數量: {quantity}")
+
+            # 自動轉換合約格式，支援 MXF1、MXF01、MXF1!、MXF 這些格式，並於轉倉區間自動下次月合約
+            import re
+            symbol_original = symbol
+            match = re.match(r"^([A-Z]+)(1|01)(!?)$", symbol)
+            rollover_days = getattr(self, 'rollover_days', 1)  # 預設1天，可由 class 參數調整
+            if match:
+                symbol_base = match.group(1)
+                temp_symbol = self.get_target_symbol(symbol_base, rollover_days)
+                if not temp_symbol or not isinstance(temp_symbol, str) or not temp_symbol.strip():
+                    self.logger.error(f"[symbol自動轉換] '{symbol_original}' 轉換後為 None 或空字串，終止下單")
+                    raise ValueError(f"symbol 自動轉換失敗，請檢查合約代碼來源: {symbol_original}")
+                symbol = temp_symbol
+                self.logger.info(f"[symbol自動轉換] '{symbol_original}' → '{symbol}'（自動轉倉邏輯）")
+            elif len(symbol) <= 4:
+                temp_symbol = self.get_target_symbol(symbol, rollover_days)
+                if not temp_symbol or not isinstance(temp_symbol, str) or not temp_symbol.strip():
+                    self.logger.error(f"[symbol自動轉換] '{symbol_original}' 轉換後為 None 或空字串，終止下單")
+                    raise ValueError(f"symbol 自動轉換失敗，請檢查合約代碼來源: {symbol_original}")
+                symbol = temp_symbol
+                self.logger.info(f"[symbol自動轉換] '{symbol_original}' → '{symbol}'（自動轉倉邏輯）")
+            # 其餘情況直接使用傳入的 symbol
+
+            # 如果 symbol 已經包含到期月份 (如MXF04)，則保持不變
             if len(symbol) <= 3 and not any(c.isdigit() for c in symbol):
-                # 針對需要自動判定近月的期貨合約
                 if symbol.upper() in ["MXF", "TXF"]:
-                    # 使用 _get_front_month_code 自動計算近月合約代碼
-                    symbol = self._get_front_month_code(symbol)
-            
-            if FUBON_SDK_AVAILABLE and not self.use_mock and self.sdk:
-                # 實際下單
-                try:
-                    # 確保有帳戶資料
-                    if not hasattr(self, 'account_list') or not self.account_list:
-                        self.logger.error("未找到帳戶資料，無法下單")
-                        return {
-                            "order_id": "",
-                            "symbol": symbol,
-                            "action": action,
-                            "quantity": quantity,
-                            "status": "Failed",
-                            "error_message": "未找到帳戶資料"
-                        }
-                        
-                    # 使用第二個帳戶
-                    account = self.account_list[1]
-                    
-                    # 轉換交易動作
-                    buy_sell_action = _fubon_neo.BSAction.Buy if action == "Buy" else _fubon_neo.BSAction.Sell
-                    
-                    # 判斷商品類型 (期貨或選擇權)
-                    is_option = 'TXO' in symbol.upper()
-                    market_type = _fubon_neo.FutOptMarketType.Option if is_option else _fubon_neo.FutOptMarketType.Future
-                    
-                    # 建立訂單物件 (參照API文檔範例)
-                    order = _fubon_neo.FutOptOrder(
-                        buy_sell=buy_sell_action,
-                        symbol=symbol,
-                        lot=quantity,
-                        market_type=market_type,
-                        price_type=_fubon_neo.FutOptPriceType.Market,  # 市價單
-                        time_in_force=_fubon_neo.TimeInForce.IOC,  # 立即成交否則取消
-                        order_type=_fubon_neo.FutOptOrderType.Auto,
-                        user_def="API_Order"  # 自訂欄位
-                    )
-                    
-                    # 市價單不需要設定價格
-                    # 使用 futopt.place_order 方法下單
-                    if hasattr(self.sdk, 'futopt') and hasattr(self.sdk.futopt, 'place_order'):
-                        self.logger.info("使用 futopt.place_order 方法下單")
-                        order_result = self.sdk.futopt.place_order(account, order)
-                    else:
-                        raise AttributeError("找不到 futopt.place_order 方法")
-                        
-                except AttributeError as e:
-                    self.logger.error(f"API下單方法不存在: {e}，使用模擬模式")
-                    self.use_mock = True
-                    return self.place_order(symbol, action, quantity)  # 使用模擬模式重試
-                    
-                if order_result.is_success:
-                    self.logger.info(f"下單成功，訂單編號: {order_result.data.order_no}")
-                    
-                    # 組織返回資料
-                    return {
-                        "order_id": order_result.data.order_no,
-                        "symbol": symbol,
-                        "action": action,
-                        "quantity": quantity,
-                        "status": "Placed",
-                        "price_type": str(order_result.data.price_type),
-                        "price": order_result.data.price,
-                        "time_in_force": str(order_result.data.time_in_force),
-                        "order_time": order_result.data.last_time if hasattr(order_result.data, 'last_time') else ""
-                    }
-                else:
-                    self.logger.error(f"下單失敗: {order_result.message}")
-                    return {
-                        "order_id": "",
-                        "symbol": symbol,
-                        "action": action,
-                        "quantity": quantity,
-                        "status": "Failed",
-                        "error_message": order_result.message
-                    }
-            else:
+                    temp_symbol = self._get_front_month_code(symbol)
+                    if not temp_symbol or not isinstance(temp_symbol, str) or not temp_symbol.strip():
+                        self.logger.error(f"[symbol補全] '{symbol_original}' 補全近月合約後為 None 或空字串，終止下單")
+                        raise ValueError(f"symbol 補全近月合約失敗，請檢查來源: {symbol_original}")
+                    symbol = temp_symbol
+                    self.logger.info(f"[symbol補全] '{symbol_original}' 自動補全近月合約 → '{symbol}'")
+
+            # 最後再檢查一次 symbol
+            if not symbol or not isinstance(symbol, str) or not symbol.strip():
+                self.logger.error(f"[下單失敗] symbol 處理後仍為空或 None，終止下單。來源: {symbol_original}")
+                raise ValueError("symbol 處理後仍為空或 None，請檢查自動轉換流程。")
+
+            # 檢查是否使用模擬模式或SDK不可用
+            if self.use_mock or not FUBON_SDK_AVAILABLE or not self.sdk:
                 # 模擬下單
-                self.logger.info("模擬模式：下單成功")
+                self.logger.info(f"[模擬下單] 商品: {symbol}, 動作: {action}, 數量: {quantity}")
                 order_id = f"SIM-{int(time.time())}"
-                
-                # 不同商品的模擬價格
-                filled_price = 0
-                if symbol == "MXF":
-                    filled_price = 18000.0
-                elif symbol == "TXF":
-                    filled_price = 700.0
-                else:
-                    filled_price = 700.0
-                
+                filled_price = 18000.0 if symbol == "MXF" else (700.0 if symbol == "TXF" else 700.0)
+                self.logger.info(f"[模擬下單成功] 模擬價格: {filled_price}，訂單編號: {order_id}")
                 return {
                     "order_id": order_id,
                     "symbol": symbol,
@@ -504,11 +728,111 @@ class FubonClient:
                     "quantity": quantity,
                     "status": "Filled",
                     "filled_price": filled_price,
-                    "filled_time": time.strftime("%Y-%m-%d %H:%M:%S")
+                    "filled_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "mock": True,
+                    "message": "這是模擬訂單，非實際交易"
                 }
+            
+            # 實際下單 (SDK可用且非模擬模式)
+            try:
+                # 確保有帳戶資料
+                if not hasattr(self, 'account_list') or not self.account_list:
+                    self.logger.error(f"[下單失敗] 找不到 account_list，symbol: {symbol}, action: {action}")
+                    return {
+                        "order_id": "",
+                        "symbol": symbol,
+                        "action": action,
+                        "quantity": quantity,
+                        "status": "Failed",
+                        "error_message": "未找到帳戶資料"
+                    }
+
+                # 使用第二個帳戶（如需調整可參數化）
+                account = self.account_list[1]
+                self.logger.info(f"[下單帳戶] 使用 account: {account}")
+
+                # 轉換交易動作
+                buy_sell_action = _fubon_neo.BSAction.Buy if action == "Buy" else _fubon_neo.BSAction.Sell
+
+                # 判斷商品類型 (期貨或選擇權)
+                is_option = 'TXO' in symbol.upper()
+                market_type = _fubon_neo.FutOptMarketType.Option if is_option else _fubon_neo.FutOptMarketType.Future
+
+                # 建立訂單物件 (參照API文檔範例)
+                order = _fubon_neo.FutOptOrder(
+                    buy_sell=buy_sell_action,
+                    symbol=symbol,
+                    lot=quantity,
+                    market_type=market_type,
+                    price_type=_fubon_neo.FutOptPriceType.Market,  # 市價單
+                    time_in_force=_fubon_neo.TimeInForce.IOC,  # 立即成交否則取消
+                    order_type=_fubon_neo.FutOptOrderType.Auto,
+                    user_def="API_Order"  # 自訂欄位
+                )
+                self.logger.info(f"[下單送出] symbol: {symbol}, action: {action}, quantity: {quantity}, market_type: {market_type}")
+
+                # 市價單不需要設定價格
+                # 使用 futopt.place_order 方法下單
+                if hasattr(self.sdk, 'futopt') and hasattr(self.sdk.futopt, 'place_order'):
+                    self.logger.info("[SDK下單] 呼叫 futopt.place_order")
+                    order_result = self.sdk.futopt.place_order(account, order)
+
+                    # 檢查下單結果
+                    if order_result.is_success:
+                        self.logger.info(f"[下單成功] 訂單編號: {getattr(order_result.data, 'order_no', 'N/A')}，symbol: {symbol}")
+                        return {
+                            "order_id": getattr(order_result.data, 'order_no', ''),
+                            "symbol": symbol,
+                            "action": action,
+                            "quantity": quantity,
+                            "status": "Placed",
+                            "price_type": str(getattr(order_result.data, 'price_type', '')),
+                            "price": getattr(order_result.data, 'price', 0.0),
+                            "time_in_force": str(getattr(order_result.data, 'time_in_force', '')),
+                            "order_time": getattr(order_result.data, 'last_time', '')
+                        }
+                    else:
+                        self.logger.error(f"[下單失敗] SDK回傳失敗，訊息: {getattr(order_result, 'message', '')}")
+                        return {
+                            "order_id": "",
+                            "symbol": symbol,
+                            "action": action,
+                            "quantity": quantity,
+                            "status": "Failed",
+                            "error_message": getattr(order_result, 'message', '')
+                        }
+                else:
+                    raise AttributeError("找不到 futopt.place_order 方法")
+                    
+            except AttributeError as e:
+                self.logger.error(f"[下單失敗] futopt.place_order 方法不存在: {e}，自動切換至模擬模式！")
+                self.use_mock = True
+                mock_order_no = f"MOCK-{int(time.time())}"
+                self.logger.info(f"[模擬下單] symbol: {symbol}, action: {action}, quantity: {quantity}, 訂單編號: {mock_order_no}")
+                return {
+                    "order_id": mock_order_no,
+                    "symbol": symbol,
+                    "action": action,
+                    "quantity": quantity,
+                    "status": "Placed (Mock)",
+                    "price_type": "Market",
+                    "price": 0,
+                    "time_in_force": "IOC",
+                    "order_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "mock": True,
+                    "message": "這是模擬訂單，非實際交易"
+                }
+                
         except Exception as e:
-            self.logger.error(f"下單時發生錯誤: {e}", exc_info=True)
-            raise
+            self.logger.error(f"[下單異常] 發生未預期錯誤: {e}", exc_info=True)
+            return {
+                "order_id": "",
+                "symbol": symbol if 'symbol' in locals() else None,
+                "action": action,
+                "quantity": quantity,
+                "status": "Error",
+                "error_message": str(e)
+            }
     
     def get_order_status(self, order_id: str) -> Dict[str, Any]:
         """

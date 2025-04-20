@@ -5,8 +5,8 @@
 import os
 import logging
 import sys
-from typing import Dict, Optional, List
-from pydantic_settings import BaseSettings
+from typing import Dict, Any, Optional
+from dotenv import load_dotenv
 
 # 設置基本日誌格式
 logging.basicConfig(
@@ -14,88 +14,134 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# 從命令行參數獲取環境設定
-if len(sys.argv) > 1 and sys.argv[1] in ["development", "test", "production"]:
-    ENV = sys.argv[1]
-    # 設置環境變數
+# Lambda 強制 production 環境，不載入任何 .env 檔案
+if os.getenv("AWS_LAMBDA_FUNCTION_NAME"):
+    ENV = "production"
     os.environ["APP_ENV"] = ENV
 else:
-    # 使用環境變數或預設值
-    ENV = os.getenv("APP_ENV", "development")
+    # 本地開發/測試可用命令行或環境變數
+    if len(sys.argv) > 1 and sys.argv[1] in ["development", "test", "production"]:
+        ENV = sys.argv[1]
+        os.environ["APP_ENV"] = ENV
+    else:
+        ENV = os.getenv("APP_ENV", "development")
+    # 只有本地才載入 .env
+    env_files = {
+        "development": ".env_development",
+        "test": ".env_test",
+        "production": ".env_production"
+    }
+    env_file = env_files.get(ENV, ".env_development")
+    if os.path.exists(env_file):
+        load_dotenv(env_file)
+    else:
+        logging.info(f"未載入任何 .env 檔案，僅用環境變數/Secrets Manager")
 
-# 選擇對應環境的配置文件
-env_files = {
-    "development": ".env_development",
-    "test": ".env_test",
-    "production": ".env_production"
-}
-env_file = env_files.get(ENV, ".env_development")
+# 輔助函數：轉換字符串到布爾值
+def str_to_bool(value: str) -> bool:
+    return str(value).lower() in ("true", "t", "yes", "y", "1")
 
-# 檢查配置文件是否存在
-if not os.path.exists(env_file):
-    logging.warning(f"配置文件 {env_file} 不存在，使用預設配置文件 .env_development")
-    env_file = ".env_development"
-    if not os.path.exists(env_file):
-        logging.error(f"預設配置文件 {env_file} 也不存在！將使用環境變數或預設值")
+# 輔助函數：轉換字符串到整數，失敗時返回預設值
+def str_to_int(value: str, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
 
-# 載入環境變數
-from dotenv import load_dotenv
-load_dotenv(env_file)
-
-class Settings(BaseSettings):
+class Settings:
     """應用程式配置類"""
-    # 環境設置
-    APP_ENV: str = ENV
     
-    # 富邦API設置
-    CERT_PATH: str = os.getenv("FUBON_CERT_PATH", "reference/S124709364.pfx")
-    CERT_PASSWORD: str = os.getenv("FUBON_CERT_PASSWORD", "")
-    PERSONAL_ID: str = os.getenv("FUBON_PERSONAL_ID", "")  # 個人ID（登入用）
-    PASSWORD: str = os.getenv("FUBON_PASSWORD", "")  # 登入密碼
+    def __init__(self):
+        # 環境設置
+        self.APP_ENV = ENV
+        
+        # 富邦API設置
+        self.CERT_PATH = os.getenv("FUBON_CERT_PATH", "reference/S124709364.pfx")
+        self.CERT_PASSWORD = os.getenv("FUBON_CERT_PASSWORD", "")
+        self.PERSONAL_ID = os.getenv("FUBON_PERSONAL_ID", "")
+        self.PASSWORD = os.getenv("FUBON_PASSWORD", "")
+        
+        # 日誌設置
+        self.LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+        
+        # 模擬交易設置
+        self.ENABLE_MOCK = str_to_bool(os.getenv("ENABLE_MOCK", "False"))
+        
+        # 伺服器設置
+        self.HOST = os.getenv("HOST", "0.0.0.0")
+        self.PORT = str_to_int(os.getenv("PORT", "8000"))
+        self.USE_HTTPS = str_to_bool(os.getenv("USE_HTTPS", "False"))
+        self.SSL_CERT = os.getenv("SSL_CERT", "ssl/cert.pem")
+        self.SSL_KEY = os.getenv("SSL_KEY", "ssl/key.pem")
+        
+        # 期貨交易相關設定
+        self.DEFAULT_MARKET = os.getenv("DEFAULT_MARKET", "TW")  # 預設市場
+        
+        # 期貨商品代碼映射
+        self.SYMBOL_MAPPING: Dict[str, str] = {
+            "小台指": "MXF",   # 小型台指期貨
+            "台積電期": "TXF",  # 台積電期貨
+            "那斯達克100": "NQF"  # 那斯達克100期貨
+        }
+        
+        # API限制設定
+        self.MAX_RETRY_COUNT = str_to_int(os.getenv("MAX_RETRY_COUNT", "3"))
+        self.REQUEST_TIMEOUT = str_to_int(os.getenv("REQUEST_TIMEOUT", "30"))
+        
+        # 密鑰設定(用於保護webhook端點)
+        self.WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+        
+        # AWS設置
+        self.AWS_REGION = os.getenv("AWS_REGION", "ap-northeast-1")
+        self.LAMBDA_FUNCTION_NAME = os.getenv("LAMBDA_FUNCTION_NAME", "fubon-trade-api")
+        self.API_GATEWAY_NAME = os.getenv("API_GATEWAY_NAME", "fubon-trade-api")
+        self.S3_BUCKET = os.getenv("S3_BUCKET", "")
+        
+        # 通知設置
+        self.ENABLE_NOTIFICATION = str_to_bool(os.getenv("ENABLE_NOTIFICATION", "False"))
+        self.LINE_NOTIFY_TOKEN = os.getenv("LINE_NOTIFY_TOKEN", "")
+        self.TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        self.TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+        
+        # 開發設置
+        self.DEBUG = str_to_bool(os.getenv("DEBUG", "False"))
+        self.RELOAD_ON_CHANGE = str_to_bool(os.getenv("RELOAD_ON_CHANGE", "True")) and ENV != "production"
+        # Lambda 啟動時自動載入 Secrets Manager
+        self._load_secrets_manager()
+
+    def _load_secrets_manager(self):
+        """如 CERT_PATH 為 secrets:xxx，則自動從 Secrets Manager 載入帳密與憑證設定"""
+        if isinstance(self.CERT_PATH, str) and self.CERT_PATH.startswith("secrets:"):
+            secret_name = self.CERT_PATH[8:]
+            try:
+                secrets_client = boto3.client('secretsmanager', region_name=self.AWS_REGION)
+                response = secrets_client.get_secret_value(SecretId=secret_name)
+                if 'SecretString' in response:
+                    secret_data = json.loads(response['SecretString'])
+                else:
+                    secret_data = json.loads(base64.b64decode(response['SecretBinary']))
+                # 依照 Secrets Manager 的 key 名稱對應
+                self.CERT_PASSWORD = secret_data.get("FUBON_CERT_PASSWORD", self.CERT_PASSWORD)
+                self.PERSONAL_ID = secret_data.get("FUBON_PERSONAL_ID", self.PERSONAL_ID)
+                self.PASSWORD = secret_data.get("FUBON_PASSWORD", self.PASSWORD)
+            except Exception as e:
+                logging.error(f"Secrets Manager 載入失敗: {e}")
     
-    # 商品代碼對照表
-    SYMBOL_MAP: Dict[str, str] = {
-        "小台指": "MXF",    # 小型台指期貨
-        "台積電期": "TXF",   # 台積電期貨
-        "那斯達克100": "NQF"  # 那斯達克100期貨
-    }
+    def __str__(self) -> str:
+        """返回設定的字符串表示"""
+        return f"Settings(APP_ENV={self.APP_ENV}, ENABLE_MOCK={self.ENABLE_MOCK})"
     
-    # API限制設定
-    MAX_RETRY_COUNT: int = 3
-    REQUEST_TIMEOUT: int = 30
-    
-    # 密鑰設定(用於保護webhook端點)
-    WEBHOOK_SECRET: str = os.getenv("WEBHOOK_SECRET", "")
-    
-    # 日誌設定
-    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
-    
-    # 模擬模式設定
-    ENABLE_MOCK: bool = os.getenv("ENABLE_MOCK", "False").lower() in ("true", "1", "yes")
-    
-    # 服務設定
-    HOST: str = os.getenv("HOST", "0.0.0.0")
-    PORT: int = int(os.getenv("PORT", "8000"))
-    
-    # HTTPS設定
-    USE_HTTPS: bool = os.getenv("USE_HTTPS", "False").lower() in ("true", "1", "yes")
-    SSL_CERT_PATH: str = os.getenv("SSL_CERT_PATH", "certs/cert.pem")
-    SSL_KEY_PATH: str = os.getenv("SSL_KEY_PATH", "certs/key.pem")
-    
-    # 開發模式設定
-    RELOAD_ON_CHANGE: bool = os.getenv("RELOAD_ON_CHANGE", "True").lower() in ("true", "1", "yes") and ENV != "production"
-    
-    # Pydantic 2.x配置
-    model_config = {
-        "env_file": env_file,
-        "extra": "ignore"  # 忽略額外的輸入
-    }
+    def to_dict(self) -> Dict[str, Any]:
+        """將設定轉換為字典"""
+        return {
+            key: value for key, value in self.__dict__.items() 
+            if isinstance(key, str) and (key.startswith("FUBON") or key in ["ENABLE_MOCK", "APP_ENV"]) and key.isupper()
+        }
 
 # 創建設定實例
 settings = Settings()
 
 # 輸出當前環境信息
-logging.info(f"當前運行環境: {settings.APP_ENV}")
-logging.info(f"使用配置文件: {env_file}")
+logging.info(f"載入環境: {settings.APP_ENV}")
 logging.info(f"模擬模式: {'啟用' if settings.ENABLE_MOCK else '關閉'}")
-logging.info(f"HTTPS: {'啟用' if settings.USE_HTTPS else '關閉'}")
+logging.info(f"日誌級別: {settings.LOG_LEVEL}")

@@ -1,6 +1,5 @@
-fastapi==0.104.1
-uvicorn==0.23.2
+# 簡化後的依賴，移除 FastAPI 相關套件
+boto3==1.28.53  # AWS SDK
 python-dotenv==1.0.0
-requests==2.31.0
-pydantic==2.4.2
-# 富邦API SDK將通過本地安裝
+requests>=2.25.0,<2.30.0  # 使用更廣泛可用的版本
+setuptools>=65.0.0  # 提供 pkg_resources 模組

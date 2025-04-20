@@ -53,7 +53,7 @@
 ### 技術選擇
 
 1. **Web框架**：
-   - FastAPI（輕量、高效能，適合低流量應用）
+   - 不使用框架
 
 2. **富邦API整合**：
    - 富邦NEO SDK (fubon_neo)
@@ -73,7 +73,7 @@
 ### 第一階段：最小可行產品(MVP)
 
 1. **建立基本webhook接收服務**
-   - 實作FastAPI服務接收POST請求
+   - 不使用框架
    - 解析TradingView特定格式的信號
    - 從訊息中提取關鍵交易資訊（動作、合約數量、商品）
 
@@ -127,6 +127,7 @@
 基於提供的範例，系統需要解析如下格式：
 ```
 策略名稱和參數：訂單{{strategy.order.action}} @ {{strategy.order.contracts}}已成交{{ticker}}。新策略倉位是{{strategy.position_size}}
+SuperTrend + QQE 策略 - 波動過濾版 + Zero Lag Trend 過濾 (加倉條件) (15, 20, 1.3, 8, 8, 3, 15, EMA, close, 20, hl2, 4, 50, 1.5, 7)：訂單buy @ 1已成交MXF1!。新策略倉位是-1
 ```
 
 其中關鍵資訊包括：
@@ -163,3 +164,7 @@
 
 3. **使用者介面**：
    - 可能增加簡單的網頁界面進行監控和設置
+
+4. **測試指令**：
+   curl.exe -X POST "https://ui4xcxhmpb.execute-api.ap-northeast-1.amazonaws.com/webhook/tradingview" -H "Content-Type: application/json" -d "{\"message\":\"SuperTrend + QQE 策略 - 波動過濾版 + Zero Lag Trend 過濾 (加倉條件) (15, 20, 1.3, 8, 8, 3, 15, EMA, close, 20, hl2, 4, 50, 1.5, 7)：訂單buy @ 1已成交MXF1!。新策略倉位是-1\"}"
+   

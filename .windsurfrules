@@ -36,3 +36,17 @@
 12. 語言選擇
 請用繁體中文說明。
 請用繁體中文寫程式的註解。
+
+13. 在開始專案前建立一個planning.md 用來當作規格書，用來說明整體方向、架構、範圍與使用技術，以及一個Task.md則用來列出專案所必須完成的工作項目，並按照優先次序進行排序。
+
+14. 每次專案開始前都要先閱讀過planning.md並且check task.md before starting a new task.
+
+15. never create a file longer than 500 lines of code.
+
+16. update read.md when new deatures are added, dependencies are changed or setup steps are modified.
+
+
+
+
+
+

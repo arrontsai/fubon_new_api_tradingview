@@ -1,0 +1,16 @@
+{
+  "name": "fubon-trade-api",
+  "version": "1.0.0",
+  "description": "富邦期貨交易API與TradingView Webhook整合系統",
+  "scripts": {
+    "deploy": "serverless deploy",
+    "remove": "serverless remove",
+    "info": "serverless info"
+  },
+  "devDependencies": {
+    "serverless": "^3.30.1",
+    "serverless-dotenv-plugin": "^6.0.0",
+    "serverless-offline": "^12.0.4",
+    "serverless-python-requirements": "^6.1.2"
+  }
+}

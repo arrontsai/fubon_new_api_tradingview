@@ -1,0 +1,11 @@
+Metadata-Version: 2.3
+Name: fubon_neo
+Version: 2.2.0
+Classifier: Programming Language :: Rust
+Classifier: Programming Language :: Python :: Implementation :: CPython
+Classifier: Programming Language :: Python :: Implementation :: PyPy
+Requires-Dist: websocket-client ==1.5.1 ; python_version <= '3.11.0'
+Requires-Dist: websocket-client ==1.8.0 ; python_version > '3.11.0'
+Requires-Dist: pyee >=9.0.4 ; python_version <= '3.11.0'
+Requires-Dist: pyee >=11.1.0 ; python_version > '3.11.0'
+Requires-Python: >=3.7
