@@ -1,3 +1,0 @@
-python-dotenv==1.0.0
-requests>=2.25.0,<2.30.0  # 使用更廣泛可用的版本
-setuptools>=65.0.0  # 提供 pkg_resources 模組
