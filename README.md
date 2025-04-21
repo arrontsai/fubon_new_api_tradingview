@@ -173,5 +173,7 @@ SuperTrend + QQE 策略 - 波動過濾版 + Zero Lag Trend 過濾 (加倉條件)
    - 自訂通知內容與觸發條件
 
 4. **測試指令**：
-   curl.exe -X POST "https://ui4xcxhmpb.execute-api.ap-northeast-1.amazonaws.com/webhook/tradingview" -H "Content-Type: application/json" -d "{\"message\":\"SuperTrend + QQE 策略 - 波動過濾版 + Zero Lag Trend 過濾 (加倉條件) (15, 20, 1.3, 8, 8, 3, 15, EMA, close, 20, hl2, 4, 50, 1.5, 7)：訂單buy @ 1已成交MXF1!。新策略倉位是-1\"}"
+   下單: curl.exe -X POST "https://ui4xcxhmpb.execute-api.ap-northeast-1.amazonaws.com/webhook/tradingview" -H "Content-Type: application/json" -d "{\"message\":\"SuperTrend + QQE 策略 - 波動過濾版 + Zero Lag Trend 過濾 (加倉條件) (15, 20, 1.3, 8, 8, 3, 15, EMA, close, 20, hl2, 4, 50, 1.5, 7)：訂單buy @ 1已成交MXF1!。新策略倉位是-1\"}"
+   檢查狀態: curl -x GET "https://ui4xcxhmpb.execute-api.ap-northeast-1.amazonaws.com/health"
+   
    
