@@ -26,6 +26,7 @@
 4. **日誌與監控模組**：
    - 記錄交易操作與結果
    - 基本錯誤處理與通知
+   - LINE 即時推播交易訊號與結果
 
 ## 功能需求
 
@@ -90,7 +91,8 @@
 
 1. **增強交易功能**
    - 完善錯誤處理機制
-   - 增加交易結果通知
+   - 透過 LINE 實時通知交易結果
+   - 完整的請求與回應記錄
 
 2. **準備雲端部署**
    - 確認富邦API在雲端環境的兼容性
@@ -118,7 +120,8 @@
 
 4. **記錄與通知**：
    - 記錄交易結果
-   - 視需求發送通知
+   - 透過 LINE 即時推播通知
+   - 完整追蹤請求與處理結果
 
 ## 數據格式與處理
 
@@ -164,6 +167,10 @@ SuperTrend + QQE 策略 - 波動過濾版 + Zero Lag Trend 過濾 (加倉條件)
 
 3. **使用者介面**：
    - 可能增加簡單的網頁界面進行監控和設置
+
+4. **增強通知功能**：
+   - 添加更多通知管道（如 Email、Telegram）
+   - 自訂通知內容與觸發條件
 
 4. **測試指令**：
    curl.exe -X POST "https://ui4xcxhmpb.execute-api.ap-northeast-1.amazonaws.com/webhook/tradingview" -H "Content-Type: application/json" -d "{\"message\":\"SuperTrend + QQE 策略 - 波動過濾版 + Zero Lag Trend 過濾 (加倉條件) (15, 20, 1.3, 8, 8, 3, 15, EMA, close, 20, hl2, 4, 50, 1.5, 7)：訂單buy @ 1已成交MXF1!。新策略倉位是-1\"}"

@@ -12,6 +12,7 @@ import time
 import base64
 import boto3
 import sys
+import requests
 from typing import Dict, Any, Optional
 
 # Lambda 啟動時自動載入 Secrets Manager 並寫入 os.environ
@@ -68,6 +69,37 @@ from secret_manager import get_secret
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def push_line_message(user_id: str, message: str, access_token: str):
+    """
+    主動推播訊息到 LINE 使用者或群組
+    
+    Args:
+        user_id: LINE userId 或群組ID
+        message: 要發送的訊息
+        access_token: LINE Channel access token
+    
+    Returns:
+        (status_code, response_text)
+    """
+    url = "https://api.line.me/v2/bot/message/push"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "to": user_id,
+        "messages": [{"type": "text", "text": message}]
+    }
+    
+    try:
+        resp = requests.post(url, headers=headers, json=data)
+        logger.info(f"LINE 推播結果: 狀態碼 {resp.status_code}")
+        return resp.status_code, resp.text
+    except Exception as e:
+        logger.error(f"LINE 推播發生錯誤: {e}")
+        return 500, str(e)
+
 def process_webhook(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
     處理 TradingView webhook 請求的主要函數
@@ -87,15 +119,26 @@ def process_webhook(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         body = event.get("body", "{}")
         if event.get("isBase64Encoded", False):
             body = base64.b64decode(body).decode('utf-8')
-            
-        # 解析 JSON
+        
+        # 首先嘗試將請求體作為 JSON 解析
+        message = ""
         try:
             if isinstance(body, str):
-                payload = json.loads(body)
+                # 嘗試解析 JSON
+                try:
+                    payload = json.loads(body)
+                    if isinstance(payload, dict):
+                        message = payload.get("message", "")
+                except json.JSONDecodeError:
+                    # 如果不是 JSON，直接將整個請求體作為訊息
+                    logger.info("請求不是 JSON 格式，將整個請求體視為訊息")
+                    message = body.strip()
             else:
                 payload = body
-        except json.JSONDecodeError as e:
-            logger.error(f"無法解析 JSON: {e}")
+                if isinstance(payload, dict):
+                    message = payload.get("message", "")
+        except Exception as e:
+            logger.error(f"處理請求體時發生錯誤: {e}")
             return {
                 "statusCode": 400,
                 "headers": {
@@ -103,15 +146,11 @@ def process_webhook(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 },
                 "body": json.dumps({
                     "status": "error",
-                    "message": "無效的 JSON 格式"
+                    "message": f"無法處理請求: {str(e)}"
                 })
             }
         
-        # 取得訊息
-        message = ""
-        if isinstance(payload, dict):
-            message = payload.get("message", "")
-        
+        # 檢查訊息是否為空
         if not message:
             logger.error("請求內容缺少 'message' 欄位或欄位為空")
             return {
@@ -131,6 +170,16 @@ def process_webhook(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         mock_enabled = False
         logger.info("模擬模式已強制關閉，僅走正式下單流程")
         try:
+            # 從 Secrets Manager 獲取 LINE 推播所需的 token 和 user_id
+            line_token = secrets.get("LINE_CHANNEL_TOKEN", "")
+            line_user_id = secrets.get("LINE_USER_ID", "")
+            
+            # 推播收到的 TradingView 請求
+            if line_token and line_user_id:
+                req_msg = f"[TradingView 請求]\n{message}"
+                push_line_message(line_user_id, req_msg, line_token)
+                logger.info("已推播 TradingView 請求到 LINE")
+            
             # 這裡是正式下單流程
             trade_info = parse_tradingview_signal(message)
             if not trade_info:
@@ -228,8 +277,8 @@ def process_webhook(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             
             logger.info(f"訂單結果: {order_result}")
             
-            # 返回成功結果
-            return {
+            # 準備回應內容
+            response_dict = {
                 "statusCode": 200,
                 "headers": {
                     "Content-Type": "application/json"
@@ -243,6 +292,15 @@ def process_webhook(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                     "timestamp": str(time.time())
                 })
             }
+            
+            # 推播 Lambda 回應
+            if line_token and line_user_id:
+                resp_body = json.loads(response_dict["body"]) if isinstance(response_dict["body"], str) else response_dict["body"]
+                resp_msg = f"[Lambda 回應]\n處理結果: {resp_body.get('status')}\n訊息: {resp_body.get('message')}\n訂單結果: {resp_body.get('order_result')}"
+                push_line_message(line_user_id, resp_msg, line_token)
+                logger.info("已推播 Lambda 回應到 LINE")
+            
+            return response_dict
         except Exception as e:
             logger.error(f"執行下單操作時發生錯誤: {e}")
             logger.error(traceback.format_exc())
